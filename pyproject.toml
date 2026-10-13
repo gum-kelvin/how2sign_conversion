@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "how2sign-pipeline"
+version = "0.2.0"
+description = "External, reversible How2Sign -> ViPo-SLT data preparation, extraction and validation pipeline."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Research use only; preserve upstream How2Sign and ViPo-SLT licences" }
+authors = [{ name = "ViPo-SLT / How2Sign integration" }]
+keywords = ["how2sign", "sign-language-translation", "viposlt", "clip", "videomae"]
+# Runtime core is standard-library only; the heavy extractors reuse whatever the
+# host ViPo-SLT environment already provides (numpy/torch/transformers/av/Pillow).
+dependencies = []
+
+[project.optional-dependencies]
+# Real extraction additionally needs the repository's own model stack.
+extract = ["numpy", "torch", "transformers", "av", "Pillow"]
+
+[project.scripts]
+how2sign-pipeline = "how2sign_pipeline.cli:main"
+
+[project.urls]
+Documentation = "https://github.com/anomalyco/opencode/issues"
+
+[tool.setuptools]
+packages = ["how2sign_pipeline"]

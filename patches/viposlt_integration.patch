@@ -1,0 +1,265 @@
+diff --git a/ablation_visual.py b/ablation_visual.py
+index 1ea02db..a96b601 100644
+--- a/ablation_visual.py
++++ b/ablation_visual.py
+@@ -36,11 +36,20 @@ def build_llm_args(args):
+     args.llm_args["gradient_checkpointing"] = getattr(args, "gradient_checkpointing", False)
+     args.llm_args["ctc_weight"] = getattr(args, "ctc_weight", 1.0)
+     args.llm_args["dataset"] = args.dataset
+-    args.llm_args["gloss_dict"] = np.load(args.dataset_info['dict_path'], allow_pickle=True).item()
++    if args.dataset.lower() == "how2sign" and args.include_ctc:
++        raise ValueError("How2Sign manifests have no verified gloss annotations; set include_ctc: false.")
++    if args.dataset.lower() == "how2sign" and args.include_pose:
++        raise ValueError("How2Sign pose conversion is not supported; set include_pose: false.")
++    args.llm_args["gloss_dict"] = (np.load(args.dataset_info['dict_path'], allow_pickle=True).item()
++                                     if args.include_ctc else {})
++    if args.include_ctc and not args.llm_args["gloss_dict"]:
++        raise ValueError("CTC requires genuine compatible gloss annotations and a nonempty gloss dictionary.")
+     args.llm_args["num_heads"] = args.temporal_args["num_heads"]
+     args.llm_args["num_layers"] = args.temporal_args["num_layers"]
+-    with open(args.dataset_info["pose_encoder_config_path"], 'r') as f:
+-        args.llm_args["pose_encoder_cfg"] = yaml.safe_load(f)["model"]["RecognitionNetwork"]
++    args.llm_args["pose_encoder_cfg"] = {}
++    if args.include_pose:
++        with open(args.dataset_info["pose_encoder_config_path"], 'r') as f:
++            args.llm_args["pose_encoder_cfg"] = yaml.safe_load(f)["model"]["RecognitionNetwork"]
+     return args
+ 
+ 
+diff --git a/dataset/loader_ft.py b/dataset/loader_ft.py
+index 6d2b007..6999c17 100644
+--- a/dataset/loader_ft.py
++++ b/dataset/loader_ft.py
+@@ -1,4 +1,5 @@
+ import os
++import warnings
+ import torch
+ import pickle
+ import numpy as np
+@@ -11,7 +12,7 @@ class PrecomputedFeatureDataset(Dataset):
+         feature_dir, sp_dir, pose_dir, mo_dir,
+         dataset="phoenix2014-T", mode="train",
+         include_sp=True, include_pose=True, include_mo=True,
+-        logger=None
++        logger=None, strict=None
+     ):
+         self.dataset = dataset
+         self.feature_dir = feature_dir
+@@ -19,7 +20,7 @@ class PrecomputedFeatureDataset(Dataset):
+         self.pose_dir = pose_dir
+         self.mo_dir = mo_dir
+ 
+-        if not os.path.exists(self.mo_dir):
++        if include_mo and not os.path.exists(self.mo_dir):
+             self.mo_dir = mo_dir.replace("/" + mode, "")
+ 
+         self.mode = mode
+@@ -34,22 +35,24 @@ class PrecomputedFeatureDataset(Dataset):
+         self.sp_suffix = "_s2wrapping"
+         self.mo_suffix = "_overlap-8"
+ 
+-        self.files = [
+-            fname.split(".")[0]
+-            for fname in os.listdir(feature_dir)
+-        ]
+-        self.filter_missing()
+-        if not self.files:
+-            raise ValueError(f"No .pkl files found in directory: {feature_dir}")
+-
++        self.strict = dataset.lower() == "how2sign" if strict is None else strict
++        if dataset.lower() == "how2sign" and self.include_pose:
++            raise ValueError("How2Sign pose conversion is not supported; disable include_pose.")
+         self.anno_path = f"./preprocess/{dataset}/{mode}_info_ml.npy"
+-        self.prep_annots(np.load(self.anno_path, allow_pickle=True).item())
+-
+-        # Pose features are only loaded when this modality is actually used.
+-        # Loading them unconditionally crashes when pose_path is absent even
+-        # though include_pose is False.
++        annots = np.load(self.anno_path, allow_pickle=True).item()
++        # The annotation manifest defines the intended samples; no frame sentinels.
++        self.files = [record["fileid"] for key, record in annots.items()
++                      if isinstance(key, int)]
++        if len(self.files) != len(set(self.files)):
++            raise ValueError(f"Duplicate fileids in {self.anno_path}")
++        if dataset.lower() == "how2sign" and any("." in name for name in self.files):
++            raise ValueError("How2Sign fileids must be period-free; regenerate the manifests.")
++        self.prep_annots(annots)
+         if self.include_pose:
+             self._pose_init(os.path.join(self.pose_dir, f"{dataset}.{mode}"), mode)
++        self.filter_missing()
++        if not self.files:
++            raise ValueError(f"No usable samples in {self.anno_path}; run extraction and validation.")
+ 
+ 
+     def _pose_init(self, path, phase):
+@@ -74,33 +77,37 @@ class PrecomputedFeatureDataset(Dataset):
+             
+ 
+     def filter_missing(self):
+-        to_remove = []
+-        for f in self.files:
+-            # if not os.path.exists(os.path.join(self.sp_dir, f + f"{self.sp_suffix}.npy")):
+-            if not os.path.exists(os.path.join(self.sp_dir, f + f".npy")):
+-                to_remove.append(f)
+-
+-        for f in to_remove:
+-            self.files.remove(f)
+-
++        missing = []
++        for fileid in self.files:
++            absent = []
++            if self.include_sp and not os.path.isfile(os.path.join(self.sp_dir, fileid + ".npy")):
++                absent.append("spatial")
++            if self.include_mo and not os.path.isfile(os.path.join(self.mo_dir, fileid + ".npy")):
++                absent.append("motion")
++            if self.include_pose and f"{self.mode}/{fileid}" not in self.pose_dict:
++                absent.append("pose")
++            if absent:
++                missing.append((fileid, absent))
++        if missing:
++            message = (f"Missing enabled features for {len(missing)}/{len(self.files)} samples "
++                       f"in {self.dataset}/{self.mode}: {missing[:10]}")
++            if self.strict:
++                raise ValueError(message + "; finish extraction or use strict=False for diagnostics.")
++            warnings.warn(message + "; excluding incomplete samples.", RuntimeWarning)
++            excluded = {fileid for fileid, _ in missing}
++            self.files = [fileid for fileid in self.files if fileid not in excluded]
+ 
+     def prep_annots(self, annots):
+-        if "prefix" in annots: del annots["prefix"]
+-
+         langs = ["en", "fr", "es"]
+         self.translations, self.text, self.gloss = {}, {}, {}
+-        for i in range(len(annots)):
+-            self.translations[annots[i]["fileid"]] = {lang: annots[i][f"{lang}_text"] for lang in langs if f"{lang}_text" in annots[i]}
+-            self.text[annots[i]["fileid"]] = annots[i]["text"] if "text" in annots[i] else ""
+-            self.gloss[annots[i]["fileid"]] = annots[i]["gloss"] if "gloss" in annots[i] else annots[i]["label"]
+-
+-        to_remove = []
+-        for key in self.translations.keys():
+-            if key not in self.files:
+-                to_remove.append(key)
+-
+-        for key in to_remove:
+-            del self.translations[key]
++        for key, record in annots.items():
++            if not isinstance(key, int):
++                continue
++            fileid = record["fileid"]
++            self.translations[fileid] = {lang: record[f"{lang}_text"] for lang in langs
++                                         if f"{lang}_text" in record}
++            self.text[fileid] = record.get("text", "")
++            self.gloss[fileid] = record.get("gloss", record.get("label", ""))
+ 
+     def __len__(self):
+         return len(self.files)
+@@ -116,7 +123,7 @@ class PrecomputedFeatureDataset(Dataset):
+         pose_ft = self.pose_dict[f"{self.mode}/{self.files[idx].replace('.pkl', '')}"]["keypoint"].permute(2, 0, 1).to(torch.float32) if self.include_pose else None
+         mo_ft = torch.tensor(np.load(mo_ft_path), dtype=torch.float32) if self.include_mo else None
+ 
+-        fileid = self.files[idx].replace(".pkl", "")
++        fileid = self.files[idx]
+         gloss = self.gloss[fileid]
+         text = self.text[fileid]
+ 
+diff --git a/main.py b/main.py
+index 4bb2c8a..d767e54 100644
+--- a/main.py
++++ b/main.py
+@@ -80,12 +80,21 @@ def setup_work_dir(arg, is_main, WORK_DIR_PATH):
+     arg.llm_args["llm_precision"] = getattr(arg, "llm_precision", "fp32")
+     arg.llm_args["gradient_checkpointing"] = getattr(arg, "gradient_checkpointing", False)
+     arg.llm_args["ctc_weight"] = getattr(arg, "ctc_weight", 1.0)
+-    arg.llm_args["gloss_dict"] = np.load(arg.dataset_info['dict_path'], allow_pickle=True).item()
++    if arg.dataset.lower() == "how2sign" and arg.include_ctc:
++        raise ValueError("How2Sign manifests have no verified gloss annotations; set include_ctc: false.")
++    if arg.dataset.lower() == "how2sign" and arg.include_pose:
++        raise ValueError("How2Sign pose conversion is not supported; set include_pose: false.")
++    arg.llm_args["gloss_dict"] = (np.load(arg.dataset_info['dict_path'], allow_pickle=True).item()
++                                     if arg.include_ctc else {})
++    if arg.include_ctc and not arg.llm_args["gloss_dict"]:
++        raise ValueError("CTC requires genuine compatible gloss annotations and a nonempty gloss dictionary.")
+     arg.llm_args["dataset"] = arg.dataset
+     arg.llm_args["num_heads"] = arg.temporal_args["num_heads"]
+     arg.llm_args["num_layers"] = arg.temporal_args["num_layers"]
+-    with open(arg.dataset_info["pose_encoder_config_path"], 'r') as f:
+-        arg.llm_args["pose_encoder_cfg"] = yaml.safe_load(f)["model"]["RecognitionNetwork"]
++    arg.llm_args["pose_encoder_cfg"] = {}
++    if arg.include_pose:
++        with open(arg.dataset_info["pose_encoder_config_path"], 'r') as f:
++            arg.llm_args["pose_encoder_cfg"] = yaml.safe_load(f)["model"]["RecognitionNetwork"]
+ 
+     ft_dataset = import_class(arg.feeder_ft)
+     shutil.copy2(inspect.getfile(ft_dataset), WORK_DIR_PATH)
+@@ -102,6 +111,11 @@ def setup_data(arg, world_size, rank, is_main):
+     elif arg.dataset == 'CSL-Daily':
+         dataset_list = zip(["train", "dev", "test"], [True, False, False, False])
+ 
++    elif 'how2sign' in arg.dataset.lower():
++        dataset_list = zip(["train", "dev", "test"], [True, False, False])
++    else:
++        raise ValueError(f"Unsupported dataset: {arg.dataset}")
++
+     data_loader, sampler = {}, {}
+     ft_dataset = import_class(arg.feeder_ft)
+     for idx, (mode, train_flag) in enumerate(dataset_list):
+@@ -398,4 +412,6 @@ if __name__ == '__main__':
+         shutil.copy2(f"./modules/ff.py", WORK_DIR_PATH)
+ 
+     world_size = torch.cuda.device_count()
++    if world_size == 0:
++        raise RuntimeError("Training requires CUDA; no CUDA device was detected. Run the external CPU smoke-test first.")
+     torch.multiprocessing.spawn(main, args=(world_size, args, WORK_DIR_PATH), nprocs=world_size, join=True)
+\ No newline at end of file
+diff --git a/models/edm_ddp.py b/models/edm_ddp.py
+index e8daee7..400cc72 100644
+--- a/models/edm_ddp.py
++++ b/models/edm_ddp.py
+@@ -71,6 +71,7 @@ class EDM(nn.Module):
+     def _prepare_llm(self, model: str) -> None:
+         llm_dtype = self._resolve_llm_dtype()
+         if "bart" in model.lower():
++            self.bart_lang_heads["How2Sign"] = "en_XX"
+             self.llm = MBartForConditionalGeneration.from_pretrained(model, torch_dtype=llm_dtype)
+             self.tokenizer = MBart50TokenizerFast.from_pretrained(
+                 model, 
+diff --git a/test.py b/test.py
+index f1d30a4..7e7e6b8 100644
+--- a/test.py
++++ b/test.py
+@@ -59,11 +59,20 @@ def setup_work_dir(arg, WORK_DIR_PATH):
+     arg.llm_args["llm_precision"] = getattr(arg, "llm_precision", "fp32")
+     arg.llm_args["gradient_checkpointing"] = getattr(arg, "gradient_checkpointing", False)
+     arg.llm_args["dataset"] = arg.dataset
+-    arg.llm_args["gloss_dict"] = np.load(arg.dataset_info['dict_path'], allow_pickle=True).item()
++    if arg.dataset.lower() == "how2sign" and arg.include_ctc:
++        raise ValueError("How2Sign manifests have no verified gloss annotations; set include_ctc: false.")
++    if arg.dataset.lower() == "how2sign" and arg.include_pose:
++        raise ValueError("How2Sign pose conversion is not supported; set include_pose: false.")
++    arg.llm_args["gloss_dict"] = (np.load(arg.dataset_info['dict_path'], allow_pickle=True).item()
++                                     if arg.include_ctc else {})
++    if arg.include_ctc and not arg.llm_args["gloss_dict"]:
++        raise ValueError("CTC requires genuine compatible gloss annotations and a nonempty gloss dictionary.")
+     arg.llm_args["num_heads"] = arg.temporal_args["num_heads"]
+     arg.llm_args["num_layers"] = arg.temporal_args["num_layers"]
+-    with open(arg.dataset_info["pose_encoder_config_path"], 'r') as f:
+-        arg.llm_args["pose_encoder_cfg"] = yaml.safe_load(f)["model"]["RecognitionNetwork"]
++    arg.llm_args["pose_encoder_cfg"] = {}
++    if arg.include_pose:
++        with open(arg.dataset_info["pose_encoder_config_path"], 'r') as f:
++            arg.llm_args["pose_encoder_cfg"] = yaml.safe_load(f)["model"]["RecognitionNetwork"]
+ 
+     ft_dataset = import_class(arg.feeder_ft)
+ 
+@@ -78,6 +87,11 @@ def setup_data(arg):
+     elif arg.dataset == 'CSL-Daily':
+         dataset_list = zip(["test"], [False])
+ 
++    elif 'how2sign' in arg.dataset.lower():
++        dataset_list = zip(["test"], [False])
++    else:
++        raise ValueError(f"Unsupported dataset: {arg.dataset}")
++
+     data_loader = {}
+     ft_dataset = import_class(arg.feeder_ft)
+     for idx, (mode, train_flag) in enumerate(dataset_list):
