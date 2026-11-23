@@ -18,6 +18,10 @@ How2Sign currently uses frontal RGB only. Pose conversion is deliberately reject
 
 The companion [audit](../AUDIT.md) records the offline acceptance work. It reports successful compilation, a 73-test suite with one dependency-path skip, static contract checks, and a synthetic loader smoke test against the patched ViPo-SLT loader. This evidence establishes integration behavior only; it does not establish real-data extraction, GPU compatibility, full-corpus coverage, or translation quality.
 
+### Test execution context
+
+The suite deliberately covers two ViPo-SLT states. Loader, guard, and smoke tests require a checkout with the integration patch applied. Installer apply/revert tests require a clean, unpatched checkout. Running the entire suite against only one of those states produces expected fixture failures; those failures are not evidence that the converter logic changed. Record the target repository revision and patch state with every test run.
+
 ## Dataset inventory on 23 November 2026
 
 A strict read-only inspection was run on a local How2Sign snapshot. The snapshot contained 1,976 files and 38,664,008,851 bytes. Its annotations contained 31,165 train rows, 1,741 validation rows, and 2,357 test rows.
