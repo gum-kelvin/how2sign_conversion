@@ -10,6 +10,10 @@ repository only receives one reversible patch file plus a few small generated
 artifacts. Everything else (features, manifests, reports) stays in your output
 folder.
 
+## Current evaluation status
+
+The converter's offline integration contract is documented in [AUDIT.md](./AUDIT.md). The current real-data readiness, evidence requirements, and known dataset blocker are documented in [docs/EVALUATION_STATUS.md](./docs/EVALUATION_STATUS.md). Read both before starting extraction or training: an available local How2Sign snapshot may be incomplete, and no performance claim should be made from the offline tests alone.
+
 It runs on Linux, macOS, Windows, and on a headless GPU server such as
 JupyterHub.
 

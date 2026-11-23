@@ -1,0 +1,33 @@
+# Python environments and generated caches
+.venv/
+venv/
+env/
+.env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local data, extraction output, models, and reports
+data/
+output/
+outputs/
+reports/
+*.npy
+*.npz
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+
+# Machine-local configuration and logs
+.env
+*.log
